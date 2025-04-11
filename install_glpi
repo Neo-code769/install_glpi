@@ -1,0 +1,93 @@
+#!/bin/bash
+
+set -e
+
+# === PARAMÈTRES ===
+GLPI_VERSION="10.0.14"
+GLPI_URL="https://github.com/glpi-project/glpi/releases/download/${GLPI_VERSION}/glpi-${GLPI_VERSION}.tgz"
+PHP_VERSION="8.2"
+DB_NAME="mariadb"
+DB_USER="glpi"
+DB_PASS="root"
+GLPI_ROOT="/var/www/glpi"
+
+echo "📦 Mise à jour du système"
+apt update && apt upgrade -y
+
+echo "📦 Installation des paquets nécessaires"
+apt install -y nginx mariadb-server php${PHP_VERSION}-fpm \
+php${PHP_VERSION}-{cli,common,opcache,gd,curl,mbstring,xml,zip,bz2,intl,mysql,ldap,apcu,soap} unzip wget
+
+echo "🔧 Configuration de MariaDB"
+mysql -e "CREATE DATABASE IF NOT EXISTS ${DB_NAME} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+mysql -e "CREATE USER IF NOT EXISTS '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASS}';"
+mysql -e "GRANT ALL PRIVILEGES ON ${DB_NAME}.* TO '${DB_USER}'@'localhost';"
+mysql -e "FLUSH PRIVILEGES;"
+
+echo "⬇️ Téléchargement et installation de GLPI"
+cd /tmp
+wget ${GLPI_URL}
+tar -xvzf glpi-${GLPI_VERSION}.tgz
+mv glpi /var/www/
+
+echo "🔐 Attribution des droits à www-data"
+chown -R www-data:www-data ${GLPI_ROOT}
+find ${GLPI_ROOT} -type d -exec chmod 755 {} \;
+find ${GLPI_ROOT} -type f -exec chmod 644 {} \;
+
+echo "🛠️ Configuration Nginx pour GLPI"
+cat > /etc/nginx/sites-available/glpi <<EOF
+server {
+    listen 80;
+    server_name _;
+
+    root ${GLPI_ROOT};
+    index index.php index.html;
+
+    location / {
+        try_files \$uri \$uri/ /index.php?\$query_string;
+    }
+
+    location ~ \.php\$ {
+        include snippets/fastcgi-php.conf;
+        fastcgi_pass unix:/run/php/php${PHP_VERSION}-fpm.sock;
+        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
+        include fastcgi_params;
+    }
+
+    location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)\$ {
+        expires max;
+        log_not_found off;
+    }
+}
+EOF
+
+# Renommer le fichier default en default.bak
+if [ -f /etc/nginx/sites-enabled/default ]; then
+    mv /etc/nginx/sites-enabled/default /etc/nginx/sites-enabled/default.bak
+    echo "🔧 Fichier 'default' renommé en 'default.bak'"
+fi
+
+mv /etc/nginx/sites-enabled/default.bak /etc/nginx/site-available
+
+ln -s /etc/nginx/sites-available/glpi /etc/nginx/sites-enabled/
+
+echo "🔁 Redémarrage des services"
+systemctl restart php${PHP_VERSION}-fpm
+systemctl restart nginx
+systemctl enable nginx mariadb php${PHP_VERSION}-fpm
+
+echo "🧪 Création du fichier test de session PHP"
+cat > ${GLPI_ROOT}/test.php <<EOF
+<?php
+session_start();
+\$_SESSION['test'] = "GLPI";
+echo "Session test OK : " . \$_SESSION['test'];
+EOF
+
+echo "✅ Installation terminée !"
+echo "➡️ Accède à GLPI : http://[IP_debian]/"
+echo "🔐 Lors du setup, utilise :"
+echo "   Base de données : ${DB_NAME}"
+echo "   Utilisateur     : ${DB_USER}"
+echo "   Mot de passe    : ${DB_PASS}"
